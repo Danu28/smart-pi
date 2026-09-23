@@ -1,20 +1,14 @@
 /**
  * budget.ts — context-budget awareness tool.
  *
- * QDS:
- *  - Question: context overflow is the #1 cost killer (aborted turn → retry →
- *    compaction). The agent has zero visibility into context usage today.
- *  - Delete: no history persistence, no UI — one tool + one 1-line guard.
- *  - Simplify: reads ctx.getContextUsage(), returns tokens/window/percent with
- *    a tiered recommendation. Optional compact:true fires ctx.compact().
- *  - Accelerate: trend (last 5 samples) lives in tool-result details, so the
- *    agent can see direction without extra calls.
- *  - Automate: a single-line steering note is appended to the next request
- *    ONLY when usage >= BUDGET_WARN_PCT (default 90), once per high-water
- *    period. Rare, tiny, and prevents overflow retries.
+ * Seamless pi integration:
+ * - promptSnippet + promptGuidelines like read/bash
+ * - themed renderCall/renderResult (collapsed tier badge, expanded advice + trend)
+ * - signal-aware execute
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { BUDGET_CLEAR_PCT, BUDGET_WARN_PCT, scanToolDetails } from "./common";
 
@@ -26,7 +20,7 @@ export interface BudgetSample {
 }
 
 const HISTORY_MAX = 5;
-let warned = false; // armed once per high-water period
+let warned = false;
 export function resetBudgetFlags(): void {
   warned = false;
 }
@@ -54,10 +48,7 @@ export function budgetAdvice(percent: number | null): string {
   }
 }
 
-/** Inject a one-line warning before an LLM request when usage is critically high. */
 export function maybeWarn(messages: any[]): { changed: boolean; messages: any[] } {
-  // usage is read by the caller (index.ts) because ctx is not reachable here;
-  // this function only appends the note to the last user message.
   const last = lastUserMessage(messages);
   if (!last) return { changed: false, messages };
   const note = "\n\n[smart-pi] context is critically full — wrap up the current task, avoid large outputs, prefer narrow edits; consider context-budget {compact:true}.";
@@ -93,11 +84,17 @@ const BudgetParams = Type.Object({
 export function registerBudgetTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "context-budget",
-    label: "Context Budget",
+    label: "context-budget",
     description:
       "Report current context usage (tokens / window / percent) with tiered advice (clear ≤50, moderate ≤70, getting-full <90, critical ≥90). Use before large reads/writes; call context-budget {compact:true} to compact. Tick the trend in details.",
+    promptSnippet: "Context budget — tokens / window / percent",
+    promptGuidelines: [
+      "Call context-budget before large reads/writes when tier is getting-full or critical.",
+      "At critical (≥90%) prefer narrow edits and compact soon.",
+    ],
     parameters: BudgetParams,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      if (signal?.aborted) throw new Error("Operation aborted");
       const usage = ctx.getContextUsage?.() ?? undefined;
       const sample: BudgetSample = {
         ts: Date.now(),
@@ -105,10 +102,8 @@ export function registerBudgetTool(pi: ExtensionAPI): void {
         window: usage?.contextWindow ?? 0,
         percent: usage?.percent ?? (usage?.tokens != null && usage.contextWindow ? Math.round((usage.tokens / usage.contextWindow) * 100) : null),
       };
-      const history = [...(scanToolDetails(ctx, "context-budget").at(-1)?.history ?? []), sample]
-        .slice(-HISTORY_MAX);
+      const history = [...(scanToolDetails(ctx, "context-budget").at(-1)?.history ?? []), sample].slice(-HISTORY_MAX);
       const pct = sample.percent;
-      // re-arm warning once usage drops back under the clear threshold
       if (pct !== null && pct < BUDGET_CLEAR_PCT) warned = false;
 
       const trend = history.length > 1 ? ` ${history.map((h: BudgetSample) => h.percent ?? "?").join("→")}` : "";
@@ -123,24 +118,50 @@ export function registerBudgetTool(pi: ExtensionAPI): void {
         try {
           ctx.compact?.();
           return {
-            content: [
-              { type: "text", text: `${text}\n\nCompaction requested — pi will compact and the next turn resumes from the summary (your focus line is preserved).` },
-            ],
-            details: { usage: sample, history, compactRequested: true },
+            content: [{ type: "text", text: `${text}\n\nCompaction requested — pi will compact and the next turn resumes from the summary (your focus line is preserved).` }],
+            details: { usage: sample, history, compactRequested: true, tier: budgetTier(pct) },
           };
         } catch {
           return {
             content: [{ type: "text", text: `${text}\n\nCompaction request failed (see runtime).` }],
-            details: { usage: sample, history, compactRequested: false, error: "compact threw" },
+            details: { usage: sample, history, compactRequested: false, error: "compact threw", tier: budgetTier(pct) },
           };
         }
       }
       return { content: [{ type: "text", text }], details: { usage: sample, history, tier: budgetTier(pct) } };
     },
+    renderCall(args, theme, _ctx) {
+      let text = theme.fg("toolTitle", theme.bold("context-budget"));
+      if (args.compact) text += theme.fg("warning", " compact");
+      return new Text(text, 0, 0);
+    },
+    renderResult(result, { expanded }, theme, _ctx) {
+      const details = result.details as { usage?: BudgetSample; tier?: string; history?: BudgetSample[] } | undefined;
+      const tier = details?.tier ?? "unknown";
+      const pct = details?.usage?.percent;
+      const color = tier === "critical" ? "error" : tier === "getting-full" ? "warning" : tier === "moderate" ? "accent" : tier === "clear" ? "success" : "dim";
+      const label = pct === null || pct === undefined ? tier : `${pct}% ${tier}`;
+      let out = theme.fg(color as any, label);
+      if (details?.usage) out += theme.fg("dim", `  ${details.usage.tokens ?? "n/a"}/${details.usage.window || "n/a"}`);
+      if (expanded) {
+        const txt = result.content[0]?.type === "text" ? result.content[0].text : "";
+        // expanded: show advice + trend
+        const advice = budgetAdvice(pct ?? null);
+        out += `\n${theme.fg("muted", advice)}`;
+        if (details?.history && details.history.length > 1) {
+          out += `\n${theme.fg("dim", "trend: " + details.history.map((h) => (h.percent ?? "?") + "%").join(" → "))}`;
+        } else if (txt) {
+          // fallback to raw text lines dimmed
+          const lines = txt.split("\n").slice(0, 4).join("\n");
+          out += `\n${theme.fg("dim", lines)}`;
+        }
+        if ((details as any)?.compactRequested) out += `\n${theme.fg("warning", "→ compaction requested")}`;
+      }
+      return new Text(out, 0, 0);
+    },
   });
 }
 
-/** Called from the `context` event when usage is critical — appends note once. */
 export function budgetGuard(messages: any[], pct: number | null): { changed: boolean; messages: any[] } {
   if (pct === null) return { changed: false, messages };
   if (pct >= BUDGET_WARN_PCT && !warned) {

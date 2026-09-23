@@ -1,18 +1,14 @@
 /**
  * intel.ts — project-intel: read-once, cached project profile.
  *
- * QDS:
- *  - Question: every fresh session re-discovers the same facts (test/lint/build
- *    commands, entry points, README intention). That is wasted reads + tokens.
- *  - Delete: no repo-wide index, no full README — only a fixed, small profile
- *    of facts the agent actually needs to plan and verify.
- *  - Simplify: read a handful of small files once (parallel), distill, cache.
- *  - Accelerate: cache in a durable entry (`smart:intel`) + module memory →
- *    later calls are 0 reads. refresh:true re-scans.
- *  - Automate: nothing injected; tool is on-demand (cost = 0 unless called).
+ * Seamless pi integration:
+ * - promptSnippet + promptGuidelines
+ * - renderCall/renderResult themed like read/ls (collapsed script summary, expanded git+readme)
+ * - signal + onUpdate streaming support
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -75,10 +71,13 @@ function detectLang(dir: string, files: string[]): string {
   return "unknown";
 }
 
-async function discover(cwd: string): Promise<ProjectProfile> {
+async function discover(cwd: string, signal?: AbortSignal, onUpdate?: (msg: string) => void): Promise<ProjectProfile> {
+  if (signal?.aborted) throw new Error("Operation aborted");
   const probe = ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "composer.json", "Gemfile", "CMakeLists.txt", "README.md", "README", "index.ts", "main.py", "src/main.rs", "main.go"];
   const present = new Set<string>();
+  onUpdate?.("scanning project files…");
   await Promise.all(probe.map(async (f) => (await exists(join(cwd, f))) && present.add(f)));
+  if (signal?.aborted) throw new Error("Operation aborted");
 
   const lang = detectLang(cwd, [...present]);
   const profile: ProjectProfile = { cwd, lang, scripts: {}, scannedAt: Date.now() };
@@ -120,6 +119,7 @@ async function discover(cwd: string): Promise<ProjectProfile> {
     profile.buildCmd = "go build ./...";
   }
 
+  onUpdate?.("reading README + git…");
   const readme = present.has("README.md") ? await readSmall(join(cwd, "README.md"), INTEL_README_CHARS) : present.has("README") ? await readSmall(join(cwd, "README"), INTEL_README_CHARS) : undefined;
   if (readme?.trim()) {
     profile.readmeExcerpt = truncate(readme.replace(/\r/g, "").trim(), 900);
@@ -153,11 +153,17 @@ const IntelParams = Type.Object({
 export function registerIntelTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "project-intel",
-    label: "Project Intel",
+    label: "project-intel",
     description:
       "Project profile: language, npm/git metadata, scripts (test/lint/build commands), main entry, README excerpt. Read once, cached durably — later calls are free. Call at the start of a task that needs build/test commands; refresh:true re-scans; projectPath to scan another dir.",
+    promptSnippet: "Project intel — language, scripts, test/lint/build",
+    promptGuidelines: [
+      "Call project-intel once at task start to get testCmd/lintCmd/buildCmd — later calls are cached (0 reads).",
+      "Use its testCmd with verify instead of guessing npm scripts.",
+    ],
     parameters: IntelParams,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, onUpdate, ctx) {
+      if (signal?.aborted) throw new Error("Operation aborted");
       const target = params.projectPath ? String(params.projectPath).trim() : ctx.cwd;
       if (cached && cached.cwd === target && !params.refresh) {
         return {
@@ -165,7 +171,13 @@ export function registerIntelTool(pi: ExtensionAPI): void {
           details: { profile: cached, source: "cache" },
         };
       }
-      const profile = await discover(target);
+      const doUpdate = (text: string) => {
+        try {
+          onUpdate?.({ content: [{ type: "text", text }], details: { profile: undefined, source: "scanning" } } as any);
+        } catch {}
+      };
+      const profile = await discover(target, signal, doUpdate);
+      if (signal?.aborted) throw new Error("Operation aborted");
       cached = profile;
       try {
         (pi as any).appendEntry?.("smart:intel", profile);
@@ -176,6 +188,43 @@ export function registerIntelTool(pi: ExtensionAPI): void {
         content: [{ type: "text", text: render(profile) }],
         details: { profile, source: "fresh" },
       };
+    },
+    renderCall(args, theme, _ctx) {
+      let text = theme.fg("toolTitle", theme.bold("project-intel"));
+      if (args.projectPath) text += ` ${theme.fg("accent", args.projectPath)}`;
+      if (args.refresh) text += theme.fg("warning", " refresh");
+      else text += theme.fg("dim", " — cached if available");
+      return new Text(text, 0, 0);
+    },
+    renderResult(result, { expanded }, theme, _ctx) {
+      const details = result.details as { profile?: ProjectProfile; source?: string } | undefined;
+      const p = details?.profile;
+      const src = details?.source;
+      if (src === "scanning") {
+        const txt = result.content[0]?.type === "text" ? result.content[0].text : "Scanning…";
+        return new Text(theme.fg("warning", txt), 0, 0);
+      }
+      if (!p) {
+        const txt = result.content[0]?.type === "text" ? result.content[0].text : "";
+        return new Text(theme.fg("toolOutput", txt.slice(0, 500)), 0, 0);
+      }
+      const name = p.name ?? p.cwd.split(/[\\/]/).pop() ?? p.cwd;
+      let out = `${theme.fg("accent", name)} ${theme.fg("dim", `(${p.lang})`)}`;
+      if (p.gitBranch) out += ` ${theme.fg("muted", p.gitBranch)}`;
+      out += src === "cache" ? theme.fg("dim", " · cached") : theme.fg("success", " · fresh");
+      const cmds: string[] = [];
+      if (p.testCmd) cmds.push(`test:${p.testCmd}`);
+      if (p.lintCmd) cmds.push(`lint:${p.lintCmd}`);
+      if (p.buildCmd) cmds.push(`build:${p.buildCmd}`);
+      if (cmds.length) out += `\n${theme.fg("muted", cmds.join("  ·  "))}`;
+      if (expanded) {
+        if (Object.keys(p.scripts).length) {
+          out += `\n${theme.fg("dim", Object.entries(p.scripts).slice(0, 6).map(([k, v]) => `${k}→${v}`).join(" | "))}`;
+        }
+        if (p.main) out += `\n${theme.fg("muted", "main:")} ${theme.fg("toolOutput", p.main)}`;
+        if (p.readmeExcerpt) out += `\n${theme.fg("dim", p.readmeExcerpt.slice(0, 200).replace(/\s+/g, " "))}…`;
+      }
+      return new Text(out, 0, 0);
     },
   });
 }

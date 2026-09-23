@@ -1,19 +1,15 @@
 /**
- * focus.ts — working-memory scratchpad (cíngulate-slice style continuity).
+ * focus.ts — working-memory scratchpad (cíngulate-slice style continuity).
  *
- * QDS:
- *  - Question: after compaction pi forgets "what am I doing right now".
- *    pi-brain's `plan` is a heavyweight 3-10 task list; a one-line current
- *    micro-goal with files + acceptance criteria is the missing piece.
- *  - Delete: no file storage — state rides in tool-result `details` like the
- *    reference todo.ts example, so it is branch-safe and free.
- *  - Simplify: one tool, 6 optional fields (+clear).
- *  - Accelerate: rebuild on session_start/session_tree by a single branch
- *    scan; injected into the compaction summary (zero steady-state cost).
- *  - Automate: focus line rides the compaction summary automatically.
+ * Seamless pi integration:
+ * - promptSnippet + promptGuidelines → shows in Available tools / Guidelines like read/bash
+ * - renderCall/renderResult → themed Text UI (collapsed/expanded), same shell as built-ins
+ * - signal abort → respects AbortSignal like every native tool
+ * - branch-safe state via tool-result details (todo.ts pattern)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { fmtAge, scanToolDetails, truncate } from "./common";
 
@@ -84,11 +80,17 @@ const FocusParams = Type.Object({
 export function registerFocusTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "focus",
-    label: "Focus",
+    label: "focus",
     description:
       "Working-memory scratchpad for the CURRENT micro-task: goal, files in scope, acceptance criteria, blocker. Survives compaction (auto-injected into the compaction summary). Helps the agent keep one coherent thread across turns. Call at task start; update as state changes; focus {clear:true} when done. Call with no params to report.",
+    promptSnippet: "Focus — working memory for the current micro-task",
+    promptGuidelines: [
+      "Call focus at task start with goal + files + acceptance; update as you progress.",
+      "Focus survives compaction automatically — no need to re-state it after /compact.",
+    ],
     parameters: FocusParams,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, _ctx) {
+      if (signal?.aborted) throw new Error("Operation aborted");
       if (params.clear) {
         state = { ...EMPTY };
         return {
@@ -117,6 +119,36 @@ export function registerFocusTool(pi: ExtensionAPI): void {
         content: [{ type: "text", text: render(next) }],
         details: { action, state: { ...next }, prev: prev.goal ? prev.goal.slice(0, 80) : undefined },
       };
+    },
+    renderCall(args, theme, _ctx) {
+      if (args.clear) return new Text(theme.fg("toolTitle", theme.bold("focus")) + theme.fg("muted", " clear"), 0, 0);
+      if (!args.goal && !args.files?.length && !args.acceptance && !args.blocker && !args.status) {
+        return new Text(theme.fg("toolTitle", theme.bold("focus")) + theme.fg("dim", " — report"), 0, 0);
+      }
+      let text = theme.fg("toolTitle", theme.bold("focus"));
+      if (args.goal) text += ` ${theme.fg("accent", `"${args.goal.slice(0, 60)}"`)}`;
+      if (args.files?.length) text += ` ${theme.fg("dim", `files:${args.files.slice(0, 3).join(",")}`)}`;
+      if (args.blocker) text += ` ${theme.fg("warning", `blocker:${args.blocker.slice(0, 30)}`)}`;
+      if (args.status) text += ` ${theme.fg("muted", args.status)}`;
+      return new Text(text, 0, 0);
+    },
+    renderResult(result, { expanded }, theme, _ctx) {
+      const details = result.details as { action?: string; state?: FocusState } | undefined;
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      if (details?.action === "clear") return new Text(theme.fg("success", "✓ Focus cleared"), 0, 0);
+      const s = details?.state;
+      if (!s) return new Text(theme.fg("toolOutput", text), 0, 0);
+      const statusColor = s.status === "blocked" ? "warning" : s.status === "done" ? "success" : "muted";
+      let out = s.goal ? theme.fg("accent", s.goal) : theme.fg("dim", "(no goal)");
+      out += `  ${theme.fg(statusColor as any, s.status)} ${theme.fg("dim", fmtAge(s.updatedAt))}`;
+      if (s.files.length) out += `\n${theme.fg("muted", "files:")} ${theme.fg("toolOutput", s.files.join(", "))}`;
+      if (expanded) {
+        if (s.acceptance) out += `\n${theme.fg("muted", "acceptance:")} ${theme.fg("toolOutput", s.acceptance)}`;
+        if (s.blocker) out += `\n${theme.fg("warning", "blocker:")} ${theme.fg("toolOutput", s.blocker)}`;
+      } else if (s.blocker) {
+        out += `\n${theme.fg("warning", "blocker:")} ${theme.fg("dim", s.blocker.slice(0, 80))}`;
+      }
+      return new Text(out, 0, 0);
     },
   });
 }
