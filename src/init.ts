@@ -112,11 +112,13 @@ export function registerInitCommand(pi: ExtensionAPI): void {
 
       // 2) context-budget snapshot (read-only, no write)
       let budgetLine = "unknown";
+      let budgetPct: number | null = null;
       try {
         const u = ctx.getContextUsage?.();
         if (u) {
-          const pct = u.percent ?? (u.tokens != null && u.contextWindow ? Math.round((u.tokens / u.contextWindow) * 100) : null);
-          budgetLine = `${pct === null ? "unknown" : pct + "%"} ${budgetTier(pct)} — ${budgetAdvice(pct)}`;
+          const rawPct = (u as any).percent;
+          budgetPct = rawPct != null ? Math.round(rawPct) : u.tokens != null && u.contextWindow ? Math.round((u.tokens / u.contextWindow) * 100) : null;
+          budgetLine = `${budgetPct === null ? "unknown" : budgetPct + "%"} ${budgetTier(budgetPct)} — ${budgetAdvice(budgetPct)}`;
         } else {
           budgetLine = "unknown (post-compaction or no model yet)";
         }
@@ -131,19 +133,49 @@ export function registerInitCommand(pi: ExtensionAPI): void {
       } catch {}
       // agent sees focus via getFocusLine() on next turn and via scanEntries fallback after tree navigation
 
+      const intelLabel = profile.name ?? profile.cwd.split(/[\\/]/).pop() ?? "unknown";
+      const intelLangNote = profile.lang === "unknown" ? "(no package.json / pyproject / Cargo etc. detected — empty folder?)" : `(${profile.lang})`;
       const lines: string[] = [
         "smart-init ready — 3 checks done",
-        `intel: ${profile.name ?? profile.cwd.split(/[\\/]/).pop()} (${profile.lang}) ${intelSource === "cache" ? "· cached" : "· fresh"}${profile.gitBranch ? ` — git:${profile.gitBranch}` : ""}`,
+        `intel: ${intelLabel} ${intelLangNote} ${intelSource === "cache" ? "· cached" : "· fresh"}${profile.gitBranch ? ` — git:${profile.gitBranch}` : " — no git"}`,
         `       test: ${profile.testCmd ?? "not detected"} | lint: ${profile.lintCmd ?? "not detected"} | build: ${profile.buildCmd ?? "not detected"}`,
         `budget: ${budgetLine}`,
         `focus: ${goal}${acceptance ? ` → acceptance: ${acceptance}` : ""}  [${focusState.status}]`,
         "",
-        "next: prompt the agent — it will use project-intel.testCmd with verify; run /smart to see status at any time.",
+        "starting agent on this task…",
       ];
-      // also hint if intelSource was fresh to nudge agent
-      if (intelSource === "fresh") lines.push("(intel was freshly scanned and cached — later calls are 0 reads)");
+      if (profile.lang === "unknown") lines.push("hint: intel is cached as 'unknown' because no project files found — after you add code, run /smart-init again or project-intel {refresh:true}");
+      if (intelSource === "fresh") lines.push("(intel freshly scanned — next calls are 0 reads)");
 
       ctx.ui?.notify?.(lines.join("\n"), "info");
+
+      // Auto-trigger the agent so the user sees progress immediately (the "nothing happens" fix)
+      // The focus + intel are already durable, so the agent resumes with full context.
+      if (ctx.signal?.aborted) return;
+      const autoPrompt = [
+        `Task: ${goal}`,
+        acceptance ? `Acceptance: ${acceptance}` : null,
+        "",
+        `Context (already prepared by /smart-init):`,
+        `- project: ${intelLabel} ${intelLangNote}${profile.gitBranch ? ` git:${profile.gitBranch}` : ""} — test: ${profile.testCmd ?? "not detected"}`,
+        `- budget: ${budgetLine}`,
+        `- focus is set — keep it updated via focus tool; verify before done`,
+        "",
+        `Proceed stepwise. If no git repo, init it first. Then enhance UI/UX, verify with ${profile.testCmd ?? profile.lintCmd ?? "appropriate check"}, and commit. Keep edits narrow and batch tool calls.`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      try {
+        if (!ctx.isIdle?.()) {
+          pi.sendUserMessage(autoPrompt, { deliverAs: "followUp" } as any);
+        } else {
+          pi.sendUserMessage(autoPrompt);
+        }
+      } catch (e: any) {
+        // fallback: at least tell user how to trigger manually
+        ctx.ui?.notify?.(`Agent not auto-started (${e?.message ?? String(e)}). Just prompt: "${goal}"`, "warning");
+      }
     },
   });
 }
