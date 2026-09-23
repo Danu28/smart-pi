@@ -16,14 +16,28 @@ Runtime intelligence for the [pi coding agent](https://github.com/earendil-works
 ## Install
 
 ```bash
-# from anywhere (loads ./src/index.ts)
-pi --extension /path/to/smart-pi/src/index.ts
+# recommended — one line, auto-updates with pi update --extensions
+pi install git:github.com/Danu28/smart-pi
 
-# or drop the repo into your project/.pi/agent/extensions dir
-cp -r smart-pi ~/.pi/agent/extensions/smart-pi
+# pin a release tag
+pi install git:github.com/Danu28/smart-pi@v1.0.0
+
+# try without installing (one session)
+pi -e git:github.com/Danu28/smart-pi
+
+# local dev (no install, loads ./src/index.ts directly)
+pi --extension ./src/index.ts
 ```
 
+Then restart `pi` (or run `/reload`). Verify with `/smart` or `pi list`.
+
 Needs pi `>= 0.85` (peer deps: `typebox`, `@earendil-works/pi-coding-agent`).
+
+```bash
+pi list                          # show installed packages
+pi update --extensions           # update all git/npm packages
+pi remove git:github.com/Danu28/smart-pi  # uninstall
+```
 
 ## Tools
 
