@@ -11,7 +11,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { fmtAge, scanToolDetails, truncate } from "./common";
+import { fmtAge, scanEntries, scanToolDetails, truncate } from "./common";
 
 export interface FocusState {
   goal?: string;
@@ -39,7 +39,49 @@ export function getFocusLine(): string | null {
 
 export function rebuildFocus(ctx: ExtensionContext): void {
   const details = scanToolDetails(ctx, "focus").at(-1);
-  state = { ...EMPTY, ...(normalize(details) ?? {}) };
+  if (details) {
+    state = { ...EMPTY, ...(normalize(details) ?? {}) };
+    return;
+  }
+  // fallback: durable entry from /smart-init (no toolResult yet)
+  const entry = scanEntries(ctx, "smart:focus").at(-1) as any;
+  if (entry && typeof entry === "object") {
+    const normalized = normalize(entry as any) ?? normalize({ state: entry } as any);
+    if (normalized) state = { ...EMPTY, ...normalized };
+  }
+}
+
+export function getFocusState(): FocusState {
+  return { ...state };
+}
+
+export function setFocusState(opts: {
+  goal?: string;
+  files?: string[];
+  acceptance?: string;
+  blocker?: string;
+  status?: FocusState["status"];
+  clear?: boolean;
+}): FocusState {
+  if (opts.clear) {
+    state = { ...EMPTY };
+    return { ...state };
+  }
+  const next: FocusState = {
+    goal: opts.goal !== undefined ? truncate(opts.goal, 200) : state.goal,
+    files: opts.files !== undefined ? [...new Set([...state.files, ...opts.files.map(String)])].slice(0, 20) : state.files,
+    acceptance: opts.acceptance !== undefined ? truncate(opts.acceptance, 300) : state.acceptance,
+    blocker: opts.blocker !== undefined ? truncate(opts.blocker, 200) : (opts.blocker === "" ? undefined : state.blocker),
+    status: opts.status === "blocked" || opts.status === "done" || opts.status === "working" ? opts.status : opts.blocker ? "blocked" : state.status,
+    updatedAt: Date.now(),
+  };
+  if (opts.blocker && opts.blocker.trim()) next.status = "blocked";
+  state = next;
+  return { ...state };
+}
+
+export function renderFocusState(s: FocusState): string {
+  return render(s);
 }
 
 function normalize(d: any): FocusState | undefined {
@@ -92,28 +134,21 @@ export function registerFocusTool(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _onUpdate, _ctx) {
       if (signal?.aborted) throw new Error("Operation aborted");
       if (params.clear) {
-        state = { ...EMPTY };
+        const prev = { ...state };
+        setFocusState({ clear: true });
         return {
           content: [{ type: "text", text: "Focus cleared." }],
-          details: { action: "clear", state: { ...state } },
+          details: { action: "clear", state: { ...state }, prev: prev.goal ? prev.goal.slice(0, 80) : undefined },
         };
       }
       const prev = { ...state };
-      const next: FocusState = {
-        goal: params.goal !== undefined ? truncate(params.goal, 200) : state.goal,
-        files: params.files !== undefined ? [...new Set([...state.files, ...params.files.map(String)])].slice(0, 20) : state.files,
-        acceptance: params.acceptance !== undefined ? truncate(params.acceptance, 300) : state.acceptance,
-        blocker: params.blocker !== undefined ? truncate(params.blocker, 200) : params.blocker === "" ? undefined : state.blocker,
-        status:
-          params.status === "blocked" || params.status === "done" || params.status === "working"
-            ? params.status
-            : params.blocker
-              ? "blocked"
-              : state.status,
-        updatedAt: Date.now(),
-      };
-      if (params.blocker && params.blocker.trim()) next.status = "blocked";
-      state = next;
+      const next = setFocusState({
+        goal: params.goal,
+        files: params.files as string[] | undefined,
+        acceptance: params.acceptance,
+        blocker: params.blocker,
+        status: params.status as FocusState["status"] | undefined,
+      });
       const action = !prev.goal && !prev.files.length ? "set" : prev.blocker && !next.blocker ? "cleared-blocker" : "update";
       return {
         content: [{ type: "text", text: render(next) }],

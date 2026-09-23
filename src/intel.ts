@@ -36,6 +36,23 @@ export function getCachedProfile(): ProjectProfile | undefined {
   return cached;
 }
 
+export function setCachedProfile(p: ProjectProfile | undefined): void {
+  cached = p;
+}
+
+export { discover };
+
+export async function ensureIntel(cwd: string, signal?: AbortSignal, onUpdate?: (msg: string) => void): Promise<{ profile: ProjectProfile; source: "cache" | "fresh" }> {
+  if (cached && cached.cwd === cwd) return { profile: cached, source: "cache" };
+  const profile = await discover(cwd, signal, onUpdate);
+  cached = profile;
+  return { profile, source: "fresh" };
+}
+
+export function renderIntelProfile(p: ProjectProfile): string {
+  return render(p);
+}
+
 export function rebuildIntel(ctx: ExtensionContext): void {
   const last = scanEntries(ctx, "smart:intel").at(-1) as ProjectProfile | undefined;
   if (last && typeof last?.cwd === "string" && last.scannedAt) cached = last;

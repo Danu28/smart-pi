@@ -32,6 +32,7 @@ import type { ExtensionAPI, ExtensionContext, ContextEvent } from "@earendil-wor
 import { budgetGuard, registerBudgetTool, resetBudgetFlags } from "./budget";
 import { fmtAge, lastToolDetails, scanEntries, scanToolDetails, truncate } from "./common";
 import { getFocusLine, rebuildFocus, registerFocusTool } from "./focus";
+import { registerInitCommand } from "./init";
 import { rebuildIntel, registerIntelTool } from "./intel";
 import { registerVerifyTool } from "./verify";
 
@@ -41,6 +42,7 @@ export default function (pi: ExtensionAPI) {
   registerBudgetTool(pi); //       context awareness + optional compact()
   registerIntelTool(pi); //        read-once project profile (scripts/test/lint/build)
   registerVerifyTool(pi); //       structured PASS/FAIL for checks
+  registerInitCommand(pi); //      opt-in bootstrap: /smart-init goal [-- acceptance] (no auto-trigger)
 
   // ---- /smart status ----
   pi.registerCommand("smart", {
