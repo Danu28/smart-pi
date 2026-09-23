@@ -21,6 +21,11 @@
     "tools"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Danu28/smart-pi.git"
+  },
+  "homepage": "https://github.com/Danu28/smart-pi#readme",
   "engines": {
     "node": ">=20"
   },
