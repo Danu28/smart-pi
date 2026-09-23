@@ -1,0 +1,46 @@
+{
+  "name": "smart-pi",
+  "version": "1.0.0",
+  "description": "Runtime intelligence for the pi coding agent: focus (compaction continuity), context-budget, project-intel, verify. Agent-friendly, productive, user-friendly, cost-efficient.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "extension",
+    "agent",
+    "smart",
+    "context",
+    "verify",
+    "focus",
+    "tools"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "npx -y tsx tests/smoke.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^24",
+    "typebox": "^1.3.30",
+    "typescript": "^5"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
